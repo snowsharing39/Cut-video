@@ -1,28 +1,38 @@
 #!/usr/bin/env bash
-# Tải video YouTube và cắt thành 2 phần bằng nhau (hoặc tại mốc thời gian tuỳ chọn).
+# Tải video YouTube (kèm phụ đề tiếng Anh) và cắt thành các phần, mỗi phần dưới 60 phút.
 # Cách dùng:
-#   ./cut_video.sh <youtube_url> [split_point]
-#   split_point: số giây hoặc HH:MM:SS (mặc định: giữa video)
+#   ./cut_video.sh <youtube_url> [so_phan]
+#   so_phan: mặc định tự tính (tối thiểu 2, mỗi phần tối đa ~58 phút)
 # Yêu cầu: yt-dlp, ffmpeg
 set -euo pipefail
 
-url="${1:?Usage: $0 <youtube_url> [split_point]}"
-split="${2:-}"
+url="${1:?Usage: $0 <youtube_url> [parts]}"
+parts="${2:-}"
+max_len=3480 # 58 phút, chừa khoảng an toàn cho giới hạn 60 phút
 out_dir="output"
 mkdir -p "$out_dir"
 
 yt-dlp -f "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b" --merge-output-format mp4 \
+  --write-subs --write-auto-subs --sub-langs "en.*,en" --convert-subs srt \
   -o "$out_dir/source.%(ext)s" "$url"
 src="$out_dir/source.mp4"
+srt=$(ls "$out_dir"/source*.srt 2>/dev/null | head -n1 || true)
 
 duration=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$src")
-if [[ -z "$split" ]]; then
-  split=$(awk -v d="$duration" 'BEGIN { printf "%.3f", d / 2 }')
+if [[ -z "$parts" ]]; then
+  parts=$(awk -v d="$duration" -v m="$max_len" 'BEGIN { n = int((d + m - 1) / m); if (n < 2) n = 2; print n }')
 fi
-echo "Duration: ${duration}s, split at: ${split}"
+len=$(awk -v d="$duration" -v n="$parts" 'BEGIN { printf "%.3f", d / n }')
+echo "Duration: ${duration}s -> $parts parts of ${len}s"
 
-# Re-encode để điểm cắt chính xác (không bị lệch keyframe).
-ffmpeg -y -i "$src" -t "$split" -c:v libx264 -preset fast -crf 20 -c:a aac "$out_dir/part1.mp4"
-ffmpeg -y -ss "$split" -i "$src" -c:v libx264 -preset fast -crf 20 -c:a aac "$out_dir/part2.mp4"
+for ((i = 0; i < parts; i++)); do
+  start=$(awk -v l="$len" -v i="$i" 'BEGIN { printf "%.3f", l * i }')
+  n=$((i + 1))
+  # Re-encode để điểm cắt chính xác (không bị lệch keyframe).
+  ffmpeg -y -ss "$start" -i "$src" -t "$len" -c:v libx264 -preset fast -crf 20 -c:a aac "$out_dir/part$n.mp4"
+  if [[ -n "$srt" ]]; then
+    ffmpeg -y -itsoffset "-$start" -i "$srt" -ss 0 -t "$len" "$out_dir/part$n.srt"
+  fi
+done
 
-echo "Done: $out_dir/part1.mp4, $out_dir/part2.mp4"
+echo "Done:"; ls -1 "$out_dir"/part*
